@@ -2,9 +2,6 @@
 
 set -e
 
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_CONF="/usr/local/etc/xray/config.json"
-
 clear
 
 echo "========================================"
@@ -29,34 +26,36 @@ echo
 read -p "请选择 [0-2]: " MENU
 
 case "$MENU" in
-1)
-;;
-2)
-echo
-echo "正在卸载 Xray..."
 
-```
-    systemctl stop xray 2>/dev/null || true
-    systemctl disable xray 2>/dev/null || true
+1. ;;
 
-    rm -f /etc/systemd/system/xray.service
-    rm -f /etc/systemd/system/xray@.service
+2. echo
+   echo "正在卸载 Xray..."
 
-    rm -rf /usr/local/bin/xray
-    rm -rf /usr/local/etc/xray
-    rm -rf /usr/local/share/xray
-    rm -rf /var/log/xray
+   systemctl stop xray 2>/dev/null || true
+   systemctl disable xray 2>/dev/null || true
 
-    systemctl daemon-reload
+   rm -f /etc/systemd/system/xray.service
+   rm -f /etc/systemd/system/xray@.service
+   rm -rf /etc/systemd/system/xray.service.d
 
-    echo
-    echo "Xray 已卸载完成"
-    exit 0
-    ;;
+   rm -f /usr/local/bin/xray
+
+   rm -rf /usr/local/etc/xray
+   rm -rf /usr/local/share/xray
+   rm -rf /var/log/xray
+
+   systemctl daemon-reload
+
+   echo
+   echo "Xray 已彻底卸载完成"
+
+   exit 0
+   ;;
+
 *)
-    exit 0
-    ;;
-```
+exit 0
+;;
 
 esac
 
@@ -69,9 +68,7 @@ read -p "请输入伪装域名(SNI) [fonts.gstatic.com]: " SNI
 SNI=${SNI:-fonts.gstatic.com}
 
 echo
-echo "========================================"
-echo "安装最新 Xray ..."
-echo "========================================"
+echo "安装最新版本 Xray..."
 
 bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
 
@@ -92,7 +89,7 @@ SERVER_IP=$(curl -s4 ip.sb)
 
 mkdir -p /usr/local/etc/xray
 
-cat > ${XRAY_CONF} <<EOF
+cat > /usr/local/etc/xray/config.json <<EOF
 {
 "log": {
 "loglevel": "warning"
@@ -138,9 +135,9 @@ cat > ${XRAY_CONF} <<EOF
 EOF
 
 echo
-echo "检查配置文件..."
+echo "检查配置..."
 
-xray run -test -config ${XRAY_CONF}
+xray run -test -config /usr/local/etc/xray/config.json
 
 echo
 echo "启动 Xray..."
@@ -179,8 +176,7 @@ echo "${VLESS_LINK}"
 echo
 
 if [ "${STATUS}" != "运行中" ]; then
-echo "Xray 启动失败，请执行："
+echo "查看错误日志："
 echo
 echo "journalctl -u xray -n 50 --no-pager"
-echo
 fi
