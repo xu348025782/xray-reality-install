@@ -154,8 +154,7 @@ else
 STATUS="启动失败"
 fi
 
-VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&pbk=${PUBLIC_KEY}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&flow=xtls-rprx-vision&encryption=none#Reality"
-
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=${SNI}&host=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#Reality"
 echo
 echo "========================================"
 echo "            安装完成"
