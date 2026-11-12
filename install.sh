@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+# Xray 版本：以后想换版本只改这一行
+XRAY_VERSION="v26.3.27"
+
 clear
 echo "========================================"
 echo "      Xray Reality 一键安装脚本"
@@ -69,13 +72,16 @@ if [ "$MENU" != "1" ]; then
   exit 0
 fi
 
-read -p "请输入监听端口 [443]: " PORT
-PORT=${PORT:-443}
+read -p "请输入监听端口 [留空随机生成]: " PORT
+if [ -z "$PORT" ]; then
+    PORT=$(shuf -i 10000-65535 -n 1)
+    echo "已随机生成端口: ${PORT}"
+fi
 read -p "请输入伪装域名(SNI) [fonts.gstatic.com]: " SNI
 SNI=${SNI:-fonts.gstatic.com}
 
 echo "安装/更新 Xray..."
-bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
+bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install --version "${XRAY_VERSION}"
 
 UUID=$(cat /proc/sys/kernel/random/uuid)
 KEY_OUTPUT=$(xray x25519)
