@@ -6,6 +6,10 @@ set -e
 # support-x25519mlkem768 就能连；换成 26.9.8+ 则新旧客户端都要对应升级。
 XRAY_VERSION="v26.3.27"
 
+# 快捷命令名：下次直接输入这个就能进菜单，想换名字只改这一行
+SHORTCUT_NAME="xx"
+SCRIPT_URL="https://raw.githubusercontent.com/xu348025782/xray-reality-install/main/install.sh"
+
 clear
 echo "========================================"
 echo "      Xray Reality 一键安装脚本"
@@ -96,15 +100,17 @@ common_software_menu() {
         echo "3. wget    - 下载工具，和 curl 互为备用"
         echo "4. unzip   - 解压 Xray 的 zip 包"
         echo "5. openssl - 生成 ShortID"
+        echo "6. sudo    - 以管理员身份执行命令"
         echo "0. 返回上级"
         echo
-        read -p "请选择 [0-5]: " SUB || return 0
+        read -p "请选择 [0-6]: " SUB || return 0
         case "$SUB" in
             1) install_one_tool bash || true ;;
             2) install_one_tool curl || true ;;
             3) install_one_tool wget || true ;;
             4) install_one_tool unzip || true ;;
             5) install_one_tool openssl || true ;;
+            6) install_one_tool sudo || true ;;
             0) return 0 ;;
             *) echo "无效选择，请重新输入" ;;
         esac
@@ -378,20 +384,45 @@ reality_menu() {
     done
 }
 
-# ---------- 10. 一级菜单 ----------
+# ---------- 10. 快捷命令 xx ----------
+# 在 /usr/local/bin/xx 写一个启动器，每次运行它都会重新从 GitHub 拉最新脚本进菜单
+# 自动调用时已存在就不重复提示；手动选 4 时会告诉你已存在还是刚创建好
+install_shortcut() {
+    local mode="${1:-manual}"
+    local target="/usr/local/bin/${SHORTCUT_NAME}"
+    if [ -x "$target" ]; then
+        if [ "$mode" = "manual" ]; then
+            echo "快捷命令 ${SHORTCUT_NAME} 已存在：下次直接输入 ${SHORTCUT_NAME} 即可进入菜单"
+        fi
+        return 0
+    fi
+    if ! printf '#!/usr/bin/env bash\nbash <(curl -Ls %s)\n' "$SCRIPT_URL" > "$target" 2>/dev/null; then
+        echo "创建快捷命令失败：没有写入 /usr/local/bin 的权限，请用 root 运行"
+        return 0
+    fi
+    chmod +x "$target" 2>/dev/null || true
+    echo "快捷命令已创建：下次直接输入 ${SHORTCUT_NAME} 即可进入菜单"
+    return 0
+}
+
+# ---------- 11. 一级菜单 ----------
+# 第一次运行就自动创建快捷命令，之后直接输入 xx 就能进菜单
+install_shortcut auto || true
 while true; do
     echo
     echo "========================================"
     echo "1. 常用软件"
     echo "2. Reality 相关"
     echo "3. 系统时区调整上海时间"
+    echo "4. 创建快捷命令 xx"
     echo "0. 退出"
     echo "========================================"
-    read -p "请选择 [0-3]: " MAIN || exit 0
+    read -p "请选择 [0-4]: " MAIN || exit 0
     case "$MAIN" in
         1) common_software_menu ;;
         2) reality_menu ;;
         3) set_timezone_shanghai ;;
+        4) install_shortcut manual || true ;;
         0) exit 0 ;;
         *) echo "无效选择，请重新输入" ;;
     esac
