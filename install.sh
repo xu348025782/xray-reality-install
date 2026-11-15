@@ -9,6 +9,9 @@ XRAY_VERSION="v26.3.27"
 # 快捷命令名：下次直接输入这个就能进菜单，想换名字只改这一行
 SHORTCUT_NAME="xx"
 SCRIPT_URL="https://raw.githubusercontent.com/xu348025782/xray-reality-install/main/install.sh"
+# 本地保存的脚本：xx 只跑这份本地文件，不联网、不默认更新；
+# 只有菜单 6 更新脚本时，才从上面的 SCRIPT_URL 拉新版覆盖它
+LOCAL_SCRIPT="/usr/local/bin/xray-reality-install.sh"
 
 clear
 echo "========================================"
@@ -384,19 +387,362 @@ reality_menu() {
     done
 }
 
-# ---------- 10. 快捷命令 xx ----------
-# 在 /usr/local/bin/xx 写一个启动器，每次运行它都会重新从 GitHub 拉最新脚本进菜单
-# 自动调用时已存在就不重复提示；手动选 4 时会告诉你已存在还是刚创建好
+# ---------- 10. nftables 端口转发：中转机 -> 落地机 ----------
+# 规则数据文件：一行一条，格式 proto|本机端口|落地机地址|落地机端口
+# proto: tcp / udp / tcp+udp；落地机地址 v4 或 v6 都行
+# 注意：地址族要跟客户端连中转机的方式一致——写 v6 地址就是 v6 转发，
+# 客户端要连中转机的 v6 地址；写 v4 就是 v4 转发。只做 DNAT 不够，
+# 还要 masquerade，否则落地机回包直回客户端、源地址对不上会被丢。
+NFT_RULES_FILE="/usr/local/etc/nft-forward.rules"
+NFT_GEN_FILE="/etc/nftables-forward.nft"
+
+nft_valid_port() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) [ "$1" -ge 1 ] && [ "$1" -le 65535 ] ;;
+    esac
+}
+
+nft_is_v6() {
+    case "$1" in *:* ) return 0 ;; *) return 1 ;; esac
+}
+
+nft_valid_ip() {
+    local ip="$1" a b c d extra o
+    if nft_is_v6 "$ip"; then
+        case "$ip" in
+            *[!0-9a-fA-F:.]*) return 1 ;;
+            *:* ) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    case "$ip" in *[!0-9.]*) return 1 ;; esac
+    IFS=. read -r a b c d extra <<EOF
+$ip
+EOF
+    [ -n "$extra" ] || [ -z "$a" ] || [ -z "$b" ] || [ -z "$c" ] || [ -z "$d" ] && return 1
+    for o in "$a" "$b" "$c" "$d"; do
+        [ "$o" -ge 0 ] 2>/dev/null && [ "$o" -le 255 ] 2>/dev/null || return 1
+    done
+    return 0
+}
+
+nft_ensure_installed() {
+    if command -v nft >/dev/null 2>&1; then return 0; fi
+    echo "未找到 nft，正在安装 nftables..."
+    install_one_tool nftables || true
+    if command -v nft >/dev/null 2>&1; then return 0; fi
+    echo "nftables 安装失败，请手动安装后再试"
+    return 1
+}
+
+nft_enable_forwarding() {
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    mkdir -p /etc/sysctl.d 2>/dev/null || true
+    printf 'net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\n' > /etc/sysctl.d/99-nft-forward.conf 2>/dev/null || true
+    return 0
+}
+
+# 按数据文件生成 nft 规则文件：v4 走 table ip，v6 走 table ip6，
+# 每条都是 prerouting DNAT + postrouting masquerade，tcp+udp 展开成两条
+nft_gen_file() {
+    local v4pre v4post v6pre v6post proto listen target tport protos p
+    v4pre=$(mktemp); v4post=$(mktemp); v6pre=$(mktemp); v6post=$(mktemp)
+    : > "$v4pre"; : > "$v4post"; : > "$v6pre"; : > "$v6post"
+    if [ -f "$NFT_RULES_FILE" ]; then
+        while IFS='|' read -r proto listen target tport || [ -n "$proto" ]; do
+            [ -z "$proto" ] && continue
+            case "$proto" in
+                tcp|udp) protos="$proto" ;;
+                tcp+udp) protos="tcp udp" ;;
+                *) continue ;;
+            esac
+            for p in $protos; do
+                if nft_is_v6 "$target"; then
+                    echo "        $p dport $listen dnat ip6 to [$target]:$tport" >> "$v6pre"
+                    echo "        ip6 daddr $target $p dport $tport masquerade" >> "$v6post"
+                else
+                    echo "        $p dport $listen dnat ip to $target:$tport" >> "$v4pre"
+                    echo "        ip daddr $target $p dport $tport masquerade" >> "$v4post"
+                fi
+            done
+        done < "$NFT_RULES_FILE"
+    fi
+    {
+        echo "# 由 xray-reality-install-multi.sh 的 nftables 端口转发菜单生成"
+        echo "# 请勿手动改，改规则用菜单 5；数据文件：$NFT_RULES_FILE"
+        if [ -s "$v4pre" ]; then
+            echo "table ip nft_forward {"
+            echo "    chain prerouting {"
+            echo "        type nat hook prerouting priority dstnat; policy accept;"
+            cat "$v4pre"
+            echo "    }"
+            echo "    chain postrouting {"
+            echo "        type nat hook postrouting priority srcnat; policy accept;"
+            cat "$v4post"
+            echo "    }"
+            echo "}"
+        fi
+        if [ -s "$v6pre" ]; then
+            echo "table ip6 nft_forward {"
+            echo "    chain prerouting {"
+            echo "        type nat hook prerouting priority dstnat; policy accept;"
+            cat "$v6pre"
+            echo "    }"
+            echo "    chain postrouting {"
+            echo "        type nat hook postrouting priority srcnat; policy accept;"
+            cat "$v6post"
+            echo "    }"
+            echo "}"
+        fi
+    } > "$NFT_GEN_FILE"
+    rm -f "$v4pre" "$v4post" "$v6pre" "$v6post"
+    return 0
+}
+
+nft_forward_is_active() {
+    command -v nft >/dev/null 2>&1 || return 1
+    nft list tables 2>/dev/null | grep -q "nft_forward"
+}
+
+# 持久化：让主配置文件 include 生成的文件，重启后还在。
+# 若主配置里已有 policy drop 的 filter 表，先不自动设开机自启，
+# 避免重启后 filter 挡住 SSH 和转发端口——先在 filter 里放行再手动开。
+nft_persist() {
+    local main=""
+    if [ -f /etc/nftables.conf ]; then main="/etc/nftables.conf"
+    elif [ -f /etc/nftables.nft ]; then main="/etc/nftables.nft"
+    elif [ "$INIT" = "systemd" ]; then main="/etc/nftables.conf"
+    else main="/etc/nftables.nft"; fi
+    if [ ! -f "$main" ]; then
+        printf 'flush ruleset\ninclude "%s"\n' "$NFT_GEN_FILE" > "$main" 2>/dev/null || return 0
+    elif ! grep -q "nftables-forward.nft" "$main" 2>/dev/null; then
+        echo "include \"$NFT_GEN_FILE\"" >> "$main" 2>/dev/null || true
+    fi
+    if grep -q "policy drop" "$main" 2>/dev/null; then
+        echo "注意：主 nftables 配置里有 policy drop 的 filter 表，"
+        echo "本次未自动设置 nftables 开机自启，请先在 filter 里放行 SSH 端口和转发端口，再手动设置开机自启。"
+        return 0
+    fi
+    if [ "$INIT" = "systemd" ]; then
+        systemctl enable nftables >/dev/null 2>&1 || true
+    else
+        rc-update add nftables default >/dev/null 2>&1 || true
+    fi
+    echo "已设置开机自启（重启后转发规则还在）"
+    return 0
+}
+
+# 生成 -> 检查 -> 加载 -> 持久化；检查不过就不应用，数据文件已保存可再试
+nft_apply() {
+    nft_ensure_installed || return 1
+    nft_enable_forwarding
+    nft_gen_file
+    if ! nft -c -f "$NFT_GEN_FILE" 2>/tmp/nft-check.err; then
+        echo "nft 规则检查未通过，未应用："
+        cat /tmp/nft-check.err 2>/dev/null || true
+        rm -f /tmp/nft-check.err
+        return 1
+    fi
+    rm -f /tmp/nft-check.err
+    nft delete table ip nft_forward 2>/dev/null || true
+    nft delete table ip6 nft_forward 2>/dev/null || true
+    if ! nft -f "$NFT_GEN_FILE" 2>/tmp/nft-apply.err; then
+        echo "nft 规则加载失败："
+        cat /tmp/nft-apply.err 2>/dev/null || true
+        rm -f /tmp/nft-apply.err
+        return 1
+    fi
+    rm -f /tmp/nft-apply.err
+    nft_persist
+    return 0
+}
+
+nft_forward_list() {
+    echo
+    if [ ! -f "$NFT_RULES_FILE" ] || [ ! -s "$NFT_RULES_FILE" ]; then
+        echo "当前没有转发规则"
+    else
+        echo "已添加的转发规则："
+        awk -F'|' '{printf "%d. %s  本机:%s  ->  %s:%s\n", NR, $1, $2, $3, $4}' "$NFT_RULES_FILE"
+    fi
+    echo
+    if nft_forward_is_active; then
+        echo "转发状态：已启动"
+        nft list table ip nft_forward 2>/dev/null || true
+        nft list table ip6 nft_forward 2>/dev/null || true
+    else
+        echo "转发状态：已停止"
+    fi
+    echo
+    return 0
+}
+
+nft_forward_add() {
+    local proto_choice proto listen target tport confirm
+    echo
+    echo "添加转发规则"
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. TCP+UDP"
+    read -p "请选择协议 [1-3]: " proto_choice || return 0
+    case "$proto_choice" in
+        1) proto="tcp" ;;
+        2) proto="udp" ;;
+        3) proto="tcp+udp" ;;
+        *) echo "无效选择"; return 0 ;;
+    esac
+    read -p "本机监听端口 [回车随机 10000-65535，或自己输入]: " listen || return 0
+    if [ -z "$listen" ]; then
+        listen=$(gen_port)
+        echo "已随机生成本机端口: ${listen}"
+    fi
+    if ! nft_valid_port "$listen"; then
+        echo "端口无效：请输入 1-65535"
+        return 0
+    fi
+    read -p "落地机地址 (v4 或 v6): " target || return 0
+    if ! nft_valid_ip "$target"; then
+        echo "地址无效：请输入落地机的 v4 或 v6 地址"
+        return 0
+    fi
+    if nft_is_v6 "$target"; then
+        echo "提示：v6 地址 = v6 转发，客户端要连中转机的 v6 地址"
+    else
+        echo "提示：v4 地址 = v4 转发，客户端要连中转机的 v4 地址"
+    fi
+    while true; do
+        read -p "落地机端口 (自己输入，没有默认值): " tport || return 0
+        if nft_valid_port "$tport"; then break; fi
+        echo "端口无效：请输入 1-65535"
+    done
+    if [ -f "$NFT_RULES_FILE" ] && grep -q "^${proto}|${listen}|" "$NFT_RULES_FILE" 2>/dev/null; then
+        echo "该协议 + 本机端口已有规则，请先删除旧规则再添加"
+        return 0
+    fi
+    echo
+    echo "确认添加：${proto}  本机:${listen}  ->  ${target}:${tport}"
+    read -p "确认吗？[Y/n]: " confirm || return 0
+    case "$confirm" in
+        n|N) echo "已取消"; return 0 ;;
+    esac
+    mkdir -p "$(dirname "$NFT_RULES_FILE")" 2>/dev/null || true
+    echo "${proto}|${listen}|${target}|${tport}" >> "$NFT_RULES_FILE"
+    if nft_apply; then
+        echo "转发规则已添加并生效：${proto} ${listen} -> ${target}:${tport}"
+    else
+        echo "规则已保存，但本次未生效，请按上面提示检查后再从菜单 5 启动"
+    fi
+    echo
+    return 0
+}
+
+nft_forward_delete() {
+    local num total
+    nft_forward_list || true
+    [ ! -f "$NFT_RULES_FILE" ] || [ ! -s "$NFT_RULES_FILE" ] && return 0
+    total=$(wc -l < "$NFT_RULES_FILE")
+    read -p "输入要删除的规则编号 [1-${total}]，回车取消: " num || return 0
+    [ -z "$num" ] && return 0
+    case "$num" in *[!0-9]*) echo "编号无效"; return 0 ;; esac
+    if [ "$num" -lt 1 ] || [ "$num" -gt "$total" ]; then echo "编号超出范围"; return 0; fi
+    awk -v n="$num" 'NR != n' "$NFT_RULES_FILE" > "${NFT_RULES_FILE}.tmp" && mv "${NFT_RULES_FILE}.tmp" "$NFT_RULES_FILE"
+    if [ -s "$NFT_RULES_FILE" ]; then
+        if nft_forward_is_active; then nft_apply || true; fi
+    else
+        nft delete table ip nft_forward 2>/dev/null || true
+        nft delete table ip6 nft_forward 2>/dev/null || true
+        nft_gen_file
+    fi
+    echo "已删除第 ${num} 条规则"
+    echo
+    return 0
+}
+
+nft_forward_clear() {
+    local confirm
+    nft_forward_list || true
+    [ ! -f "$NFT_RULES_FILE" ] || [ ! -s "$NFT_RULES_FILE" ] && return 0
+    read -p "确认清空全部转发规则？[y/N]: " confirm || return 0
+    case "$confirm" in
+        y|Y) ;;
+        *) echo "已取消"; return 0 ;;
+    esac
+    : > "$NFT_RULES_FILE"
+    nft delete table ip nft_forward 2>/dev/null || true
+    nft delete table ip6 nft_forward 2>/dev/null || true
+    nft_gen_file
+    echo "已清空全部转发规则"
+    echo
+    return 0
+}
+
+nft_forward_toggle() {
+    if nft_forward_is_active; then
+        nft delete table ip nft_forward 2>/dev/null || true
+        nft delete table ip6 nft_forward 2>/dev/null || true
+        echo "转发已停止（规则已保存，选 5 再启动会重新加载）"
+    else
+        if [ ! -f "$NFT_RULES_FILE" ] || [ ! -s "$NFT_RULES_FILE" ]; then
+            echo "当前没有转发规则，请先选 1 添加"
+            return 0
+        fi
+        if nft_apply; then
+            echo "转发已启动"
+        else
+            echo "转发启动失败，请按上面提示检查"
+        fi
+    fi
+    echo
+    return 0
+}
+
+nft_forward_menu() {
+    while true; do
+        echo
+        echo "========================================"
+        echo "      nftables 端口转发"
+        echo "========================================"
+        if nft_forward_is_active; then
+            echo "转发状态：已启动"
+        else
+            echo "转发状态：已停止"
+        fi
+        echo "1. 添加转发规则"
+        echo "2. 查看转发规则"
+        echo "3. 删除转发规则"
+        echo "4. 清空所有转发规则"
+        echo "5. 启动 / 停止转发"
+        echo "0. 返回上级"
+        echo
+        read -p "请选择 [0-5]: " SUB || return 0
+        case "$SUB" in
+            1) nft_forward_add || true ;;
+            2) nft_forward_list || true ;;
+            3) nft_forward_delete || true ;;
+            4) nft_forward_clear || true ;;
+            5) nft_forward_toggle || true ;;
+            0) return 0 ;;
+            *) echo "无效选择，请重新输入" ;;
+        esac
+    done
+}
+
+# ---------- 11. 快捷命令 xx + 本地保存 + 更新脚本 ----------
+# xx 是本地模式：只跑 LOCAL_SCRIPT，不联网拉取，所以平时进菜单不会默认更新。
+# 只有菜单 6 更新脚本时，才从 GitHub 拉新版覆盖 LOCAL_SCRIPT，再重进菜单。
+# 本地文件不存在时（比如被误删），xx 才回落到从 GitHub 拉一次。
 install_shortcut() {
     local mode="${1:-manual}"
     local target="/usr/local/bin/${SHORTCUT_NAME}"
-    if [ -x "$target" ]; then
+    if [ -x "$target" ] && grep -qF "$LOCAL_SCRIPT" "$target" 2>/dev/null; then
         if [ "$mode" = "manual" ]; then
             echo "快捷命令 ${SHORTCUT_NAME} 已存在：下次直接输入 ${SHORTCUT_NAME} 即可进入菜单"
         fi
         return 0
     fi
-    if ! printf '#!/usr/bin/env bash\nbash <(curl -Ls %s)\n' "$SCRIPT_URL" > "$target" 2>/dev/null; then
+    if ! printf '#!/usr/bin/env bash\nif [ -f "%s" ]; then\n  exec bash "%s" "$@"\nelse\n  bash <(curl -Ls %s)\nfi\n' "$LOCAL_SCRIPT" "$LOCAL_SCRIPT" "$SCRIPT_URL" > "$target" 2>/dev/null; then
         echo "创建快捷命令失败：没有写入 /usr/local/bin 的权限，请用 root 运行"
         return 0
     fi
@@ -405,8 +751,72 @@ install_shortcut() {
     return 0
 }
 
-# ---------- 11. 一级菜单 ----------
-# 第一次运行就自动创建快捷命令，之后直接输入 xx 就能进菜单
+# 把当前运行的脚本存一份到本地，供 xx 下次直接跑。
+# 从文件跑的（bash /路径/脚本.sh）：直接复制那个文件；
+# 从管道跑的（bash <(curl …)）：BASH_SOURCE 是 /dev/fd/…，没法复制，
+# 就从 GitHub 再拉一次存下来——反正这次跑的版本就是刚拉下来的那份。
+# 从 xx 本地模式跑的：源文件就是 LOCAL_SCRIPT 本身，跳过不重复保存。
+save_local_copy() {
+    local src="${BASH_SOURCE[0]:-}"
+    if [ -n "$src" ] && [ -f "$src" ]; then
+        case "$src" in /dev/fd/*|/proc/self/fd/*) src="" ;; esac
+    else
+        src=""
+    fi
+    if [ -n "$src" ]; then
+        if [ "$src" != "$LOCAL_SCRIPT" ]; then
+            cp "$src" "$LOCAL_SCRIPT" 2>/dev/null || true
+            chmod +x "$LOCAL_SCRIPT" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then return 0; fi
+    if curl -fsSL "$SCRIPT_URL" -o "${LOCAL_SCRIPT}.tmp" 2>/dev/null; then
+        if bash -n "${LOCAL_SCRIPT}.tmp" 2>/dev/null; then
+            mv "${LOCAL_SCRIPT}.tmp" "$LOCAL_SCRIPT" 2>/dev/null || true
+            chmod +x "$LOCAL_SCRIPT" 2>/dev/null || true
+        else
+            rm -f "${LOCAL_SCRIPT}.tmp"
+        fi
+    fi
+    return 0
+}
+
+# 菜单 6 更新脚本：唯一会联网拉新版的地方。
+# 下载 -> bash -n 检查 -> 和本地版比对：一样就报已是最新，不同就覆盖本地
+# 并用 exec 重进新版菜单；下载或检查失败就留在旧版不动。
+update_script() {
+    local tmp="/tmp/xray-reality-install-new.sh"
+    echo "正在从 GitHub 检查最新版..."
+    if ! command -v curl >/dev/null 2>&1; then
+        install_one_tool curl || true
+    fi
+    if ! curl -fsSL "$SCRIPT_URL" -o "$tmp" 2>/dev/null; then
+        echo "更新失败：下载不到最新版，请检查网络或 GitHub 仓库，当前仍是旧版"
+        rm -f "$tmp"
+        return 0
+    fi
+    if ! bash -n "$tmp" 2>/dev/null; then
+        echo "更新失败：下载到的新版语法检查没过，已丢弃，当前仍是旧版"
+        rm -f "$tmp"
+        return 0
+    fi
+    if [ -f "$LOCAL_SCRIPT" ] && cmp -s "$tmp" "$LOCAL_SCRIPT"; then
+        echo "已是最新版本，无需更新"
+        rm -f "$tmp"
+        return 0
+    fi
+    mv "$tmp" "$LOCAL_SCRIPT" 2>/dev/null || { echo "更新失败：写不进 $LOCAL_SCRIPT，请用 root 运行"; rm -f "$tmp"; return 0; }
+    chmod +x "$LOCAL_SCRIPT" 2>/dev/null || true
+    echo "更新成功，正在进入新版菜单..."
+    sleep 1 2>/dev/null || true
+    exec bash "$LOCAL_SCRIPT"
+}
+
+# ---------- 12. 一级菜单 ----------
+# 第一次运行先把当前脚本存到本地、再自动创建快捷命令，
+# 之后直接输入 xx 就能进菜单（跑本地文件，不默认更新）
+save_local_copy || true
 install_shortcut auto || true
 while true; do
     echo
@@ -415,14 +825,18 @@ while true; do
     echo "2. Reality 相关"
     echo "3. 系统时区调整上海时间"
     echo "4. 创建快捷命令 xx"
+    echo "5. nftables 端口转发"
+    echo "6. 更新脚本"
     echo "0. 退出"
     echo "========================================"
-    read -p "请选择 [0-4]: " MAIN || exit 0
+    read -p "请选择 [0-6]: " MAIN || exit 0
     case "$MAIN" in
         1) common_software_menu ;;
         2) reality_menu ;;
         3) set_timezone_shanghai ;;
         4) install_shortcut manual || true ;;
+        5) nft_forward_menu ;;
+        6) update_script || true ;;
         0) exit 0 ;;
         *) echo "无效选择，请重新输入" ;;
     esac
