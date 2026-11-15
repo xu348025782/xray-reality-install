@@ -813,7 +813,76 @@ update_script() {
     exec bash "$LOCAL_SCRIPT"
 }
 
-# ---------- 12. 一级菜单 ----------
+# ---------- 12. 切换 V4/V6 优先：gai.conf 版 ----------
+# 借鉴 ssh_tool 第 10 项的做法：优先 V4 就是在 /etc/gai.conf 里加
+# precedence ::ffff:0:0/96  100，优先 V6 就是删掉这行恢复默认。
+# 只改 gai.conf，不做 Alpine 特殊处理；不提供禁用 IPv6 的选项。
+# 注意：只影响出站解析域名时选 v4 还是 v6，不影响 Reality 地址（写死的 IP）。
+ip_priority_menu() {
+    local GAI_CONF="/etc/gai.conf"
+    while true; do
+        echo
+        echo "========================================"
+        echo "      切换 V4/V6 优先"
+        echo "========================================"
+        if grep -qE '^\s*precedence\s+::ffff:0:0/96\s+100' "$GAI_CONF" 2>/dev/null; then
+            echo "当前网络优先级设置：IPv4 优先"
+        else
+            echo "当前网络优先级设置：IPv6 优先"
+        fi
+        echo "1. 优先 V4"
+        echo "2. 优先 V6"
+        echo "0. 返回上级"
+        echo
+        read -p "请选择 [0-2]: " SUB || return 0
+        case "$SUB" in
+            1)
+                [ ! -f "${GAI_CONF}.bak" ] && cp "$GAI_CONF" "${GAI_CONF}.bak" 2>/dev/null || true
+                [ ! -f "$GAI_CONF" ] && touch "$GAI_CONF" 2>/dev/null || true
+                sed -i '/^\s*precedence\s\+::ffff:0:0\/96/d' "$GAI_CONF" 2>/dev/null || true
+                echo "precedence ::ffff:0:0/96  100" >> "$GAI_CONF"
+                # IPv6 被禁用的话，优先 V4 也连不上 v6，先问要不要重新开启
+                v6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "")
+                if [ "$v6_disabled" = "1" ]; then
+                    echo
+                    echo "IPv6 已禁用，是否需要开启？[Y/N]"
+                    read -p "是否需要开启？[Y/N]: " choice || true
+                    if [[ "$choice" =~ [Yy] ]]; then
+                        sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+                        sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
+                        sysctl -w net.ipv6.conf.lo.disable_ipv6=0 >/dev/null 2>&1 || true
+                        sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf 2>/dev/null || true
+                        sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf 2>/dev/null || true
+                        sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf 2>/dev/null || true
+                        {
+                            echo "net.ipv6.conf.all.disable_ipv6 = 0"
+                            echo "net.ipv6.conf.default.disable_ipv6 = 0"
+                            echo "net.ipv6.conf.lo.disable_ipv6 = 0"
+                        } >> /etc/sysctl.conf 2>/dev/null || true
+                        sysctl -p >/dev/null 2>&1 || true
+                    fi
+                fi
+                echo
+                echo "已切换为 IPv4 优先（IPv6 仍然可用，只是优先级降低）"
+                echo
+                ;;
+            2)
+                [ ! -f "${GAI_CONF}.bak" ] && cp "$GAI_CONF" "${GAI_CONF}.bak" 2>/dev/null || true
+                [ ! -f "$GAI_CONF" ] && touch "$GAI_CONF" 2>/dev/null || true
+                # 移除 IPv4 优先规则即可恢复默认 IPv6 优先
+                sed -i '/^\s*precedence\s\+::ffff:0:0\/96/d' "$GAI_CONF" 2>/dev/null || true
+                sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+                echo
+                echo "已切换为 IPv6 优先（IPv4 仍然可用，只是优先级降低）"
+                echo
+                ;;
+            0) return 0 ;;
+            *) echo "无效选择，请重新输入" ;;
+        esac
+    done
+}
+
+# ---------- 13. 一级菜单 ----------
 # 第一次运行先把当前脚本存到本地、再自动创建快捷命令，
 # 之后直接输入 xx 就能进菜单（跑本地文件，不默认更新）
 save_local_copy || true
@@ -827,9 +896,10 @@ while true; do
     echo "4. 创建快捷命令 xx"
     echo "5. nftables 端口转发"
     echo "6. 更新脚本"
+    echo "7. 切换 V4/V6 优先"
     echo "0. 退出"
     echo "========================================"
-    read -p "请选择 [0-6]: " MAIN || exit 0
+    read -p "请选择 [0-7]: " MAIN || exit 0
     case "$MAIN" in
         1) common_software_menu ;;
         2) reality_menu ;;
@@ -837,6 +907,7 @@ while true; do
         4) install_shortcut manual || true ;;
         5) nft_forward_menu ;;
         6) update_script || true ;;
+        7) ip_priority_menu ;;
         0) exit 0 ;;
         *) echo "无效选择，请重新输入" ;;
     esac
