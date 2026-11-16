@@ -890,13 +890,25 @@ ip_priority_menu() {
 # ---------- 12. 本机信息：借鉴 ssh_tool 第 1 项 ----------
 # 显示内容和 ssh_tool 第 1 项一致：主机名、运营商、系统版本、内核、
 # CPU（架构/型号/核心数/占用）、内存、虚拟内存、硬盘、总收发流量、
-# 拥堵算法、公网 v4/v6、地理位置、系统时间、运行时长。
+# 拥堵算法、公网 v4/v6、地理位置、系统时间、运行时长；另加一行网络优先级。
+# 配色也和 ssh_tool 一样：项目白色、数值紫色（非终端时不上色）。
 # 只读不改任何配置；查公网 IP 和地理位置要联网（curl -m 2，超时就显示未知）。
+# 看完按任意键才回菜单（执行完成 / 按任意键返回...），不直接把菜单打出来。
 show_local_info() {
     local hostname_val os_info kernel_version cpu_arch cpu_info cpu_cores
-    local cpu_usage mem_info swap_info disk_info traffic_info
+    local cpu_usage cpu_stat1 cpu_stat2 mem_info swap_info disk_info
+    local rx_str tx_str traffic_nums
     local congestion_algorithm queue_algorithm ipv4_address ipv6_address
-    local country city isp_info current_time runtime
+    local country city isp_info current_time runtime priority_text
+    local C_WHITE C_PURPLE C_GREEN C_YELLOW C_NC
+    # 颜色：项目白色、具体数值紫色，和 ssh_tool 第 1 项一样；
+    # 不是终端（比如重定向到文件）就不上色
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+        C_WHITE=$'\033[1;97m'; C_PURPLE=$'\033[1;35m'
+        C_GREEN=$'\033[1;32m'; C_YELLOW=$'\033[1;33m'; C_NC=$'\033[0m'
+    else
+        C_WHITE=""; C_PURPLE=""; C_GREEN=""; C_YELLOW=""; C_NC=""
+    fi
     hostname_val=$(hostname 2>/dev/null || echo "未知")
     kernel_version=$(uname -r 2>/dev/null || echo "未知")
     cpu_arch=$(uname -m 2>/dev/null || echo "未知")
@@ -910,14 +922,15 @@ show_local_info() {
     fi
     [ -z "$cpu_info" ] && cpu_info="未知"
 
-    # CPU 占用：GNU top 的 Cpu(s) 行是 us+sy；BusyBox top 没有这行，
-    # 它的 CPU: 行是 usr/sys/nic/idle，占用 = 100 - idle
+    # CPU 占用：不用 top 解析——top 在容器里算出的数会错（ssh_tool 在这台
+    # Alpine 上就显示过 3282.00%），改成读两次 /proc/stat 自己算：
+    # 占用 = 100 * (1 - 空闲增量 / 总增量)，结果一定在 0-100 之间
     cpu_usage=""
-    if command -v top >/dev/null 2>&1; then
-        cpu_usage=$(top -bn1 2>/dev/null | grep -i 'Cpu(s)' | head -1 | awk '{printf "%.2f", $2 + $4}' || true)
-        if [ -z "$cpu_usage" ]; then
-            cpu_usage=$(top -bn1 2>/dev/null | grep -i '^CPU:' | awk '{for (i=1; i<=NF; i++) if ($i == "idle") {printf "%.2f", 100 - $(i-1); exit}}' || true)
-        fi
+    if [ -r /proc/stat ]; then
+        cpu_stat1=$(awk '/^cpu /{t=0; for (i=2; i<=NF; i++) t+=$i; print t, $5+$6}' /proc/stat 2>/dev/null || true)
+        sleep 0.5 2>/dev/null || true
+        cpu_stat2=$(awk '/^cpu /{t=0; for (i=2; i<=NF; i++) t+=$i; print t, $5+$6}' /proc/stat 2>/dev/null || true)
+        cpu_usage=$(awk -v a="$cpu_stat1" -v b="$cpu_stat2" 'BEGIN{split(a, A, " "); split(b, B, " "); dt=B[1]-A[1]; di=B[2]-A[2]; if (dt > 0) printf "%.2f", 100*(1-di/dt)}' 2>/dev/null || true)
     fi
     [ -z "$cpu_usage" ] && cpu_usage="未知"
 
@@ -934,21 +947,26 @@ show_local_info() {
     disk_info=$(df -h 2>/dev/null | awk '$NF=="/"{printf "%s/%s (%s)", $3, $2, $5}' || true)
     [ -z "$disk_info" ] && disk_info="未知"
 
-    # 总接收 / 总发送（/proc/net/dev 各网卡求和）
-    traffic_info=$(awk 'BEGIN { rx_total = 0; tx_total = 0 }
-        NR > 2 { rx_total += $2; tx_total += $10 }
-        END {
-            rx_units = "Bytes"; tx_units = "Bytes";
-            if (rx_total > 1024) { rx_total /= 1024; rx_units = "KB"; }
-            if (rx_total > 1024) { rx_total /= 1024; rx_units = "MB"; }
-            if (rx_total > 1024) { rx_total /= 1024; rx_units = "GB"; }
-            if (tx_total > 1024) { tx_total /= 1024; tx_units = "KB"; }
-            if (tx_total > 1024) { tx_total /= 1024; tx_units = "MB"; }
-            if (tx_total > 1024) { tx_total /= 1024; tx_units = "GB"; }
-            printf("总接收: %.2f %s\n总发送: %.2f %s\n", rx_total, rx_units, tx_total, tx_units);
-        }' /proc/net/dev 2>/dev/null || true)
-    [ -z "$traffic_info" ] && traffic_info="总接收: 未知
-总发送: 未知"
+    # 总接收 / 总发送（/proc/net/dev 各网卡求和），分别存成两个字符串好上色
+    rx_str="未知"; tx_str="未知"
+    if [ -r /proc/net/dev ]; then
+        traffic_nums=$(awk 'BEGIN { rx_total = 0; tx_total = 0 }
+            NR > 2 { rx_total += $2; tx_total += $10 }
+            END {
+                rx_units = "Bytes"; tx_units = "Bytes";
+                if (rx_total > 1024) { rx_total /= 1024; rx_units = "KB"; }
+                if (rx_total > 1024) { rx_total /= 1024; rx_units = "MB"; }
+                if (rx_total > 1024) { rx_total /= 1024; rx_units = "GB"; }
+                if (tx_total > 1024) { tx_total /= 1024; tx_units = "KB"; }
+                if (tx_total > 1024) { tx_total /= 1024; tx_units = "MB"; }
+                if (tx_total > 1024) { tx_total /= 1024; tx_units = "GB"; }
+                printf("%.2f %s %.2f %s", rx_total, rx_units, tx_total, tx_units);
+            }' /proc/net/dev 2>/dev/null || true)
+        if [ -n "$traffic_nums" ]; then
+            rx_str=$(echo "$traffic_nums" | awk '{print $1, $2}')
+            tx_str=$(echo "$traffic_nums" | awk '{print $3, $4}')
+        fi
+    fi
 
     congestion_algorithm=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
     queue_algorithm=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
@@ -982,44 +1000,63 @@ show_local_info() {
     current_time=$(date "+%Y-%m-%d %I:%M %p" 2>/dev/null || echo "未知")
     runtime=$(awk -F. '{run_days=int($1 / 86400); run_hours=int(($1 % 86400) / 3600); run_minutes=int(($1 % 3600) / 60); if (run_days > 0) printf("%d天 ", run_days); if (run_hours > 0) printf("%d时 ", run_hours); printf("%d分\n", run_minutes)}' /proc/uptime 2>/dev/null || echo "未知")
 
+    # 网络优先级：和菜单 8 同一个判断——gai.conf 里有 precedence 100 就是 V4 优先，
+    # 没有就是 V6 优先（默认）；musl 系统（Alpine）不读 gai.conf，顺带注明不生效
+    if grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100([[:space:]]|$)' /etc/gai.conf 2>/dev/null; then
+        priority_text="IPv4 优先"
+    else
+        priority_text="IPv6 优先（默认）"
+    fi
+    if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then
+        priority_text="$priority_text（gai.conf 不生效）"
+    fi
+
     echo
-    echo "系统信息详情"
+    echo -e "${C_WHITE}系统信息详情${C_NC}"
     echo "------------------------"
-    echo "主机名: $hostname_val"
-    echo "运营商: $isp_info"
+    echo -e "${C_WHITE}主机名: ${C_PURPLE}${hostname_val}${C_NC}"
+    echo -e "${C_WHITE}运营商: ${C_PURPLE}${isp_info}${C_NC}"
     echo "------------------------"
-    echo "系统版本: $os_info"
-    echo "Linux版本: $kernel_version"
+    echo -e "${C_WHITE}系统版本: ${C_PURPLE}${os_info}${C_NC}"
+    echo -e "${C_WHITE}Linux版本: ${C_PURPLE}${kernel_version}${C_NC}"
     echo "------------------------"
-    echo "CPU架构: $cpu_arch"
-    echo "CPU型号: $cpu_info"
-    echo "CPU核心数: $cpu_cores"
+    echo -e "${C_WHITE}CPU架构: ${C_PURPLE}${cpu_arch}${C_NC}"
+    echo -e "${C_WHITE}CPU型号: ${C_PURPLE}${cpu_info}${C_NC}"
+    echo -e "${C_WHITE}CPU核心数: ${C_PURPLE}${cpu_cores}${C_NC}"
     echo "------------------------"
     if [ "$cpu_usage" = "未知" ]; then
-        echo "CPU占用: 未知"
+        echo -e "${C_WHITE}CPU占用: ${C_PURPLE}未知${C_NC}"
     else
-        echo "CPU占用: $cpu_usage%"
+        echo -e "${C_WHITE}CPU占用: ${C_PURPLE}${cpu_usage}%${C_NC}"
     fi
-    echo "物理内存: $mem_info"
-    echo "虚拟内存: $swap_info"
-    echo "硬盘占用: $disk_info"
+    echo -e "${C_WHITE}物理内存: ${C_PURPLE}${mem_info}${C_NC}"
+    echo -e "${C_WHITE}虚拟内存: ${C_PURPLE}${swap_info}${C_NC}"
+    echo -e "${C_WHITE}硬盘占用: ${C_PURPLE}${disk_info}${C_NC}"
     echo "------------------------"
-    echo "$traffic_info"
+    echo -e "${C_WHITE}总接收: ${C_PURPLE}${rx_str}${C_NC}"
+    echo -e "${C_WHITE}总发送: ${C_PURPLE}${tx_str}${C_NC}"
     echo "------------------------"
-    echo "网络拥堵算法: $congestion_algorithm $queue_algorithm"
+    echo -e "${C_WHITE}网络拥堵算法: ${C_PURPLE}${congestion_algorithm} ${queue_algorithm}${C_NC}"
     echo "------------------------"
-    echo "公网IPv4地址: $ipv4_address"
-    echo "公网IPv6地址: $ipv6_address"
+    echo -e "${C_WHITE}公网IPv4地址: ${C_PURPLE}${ipv4_address}${C_NC}"
+    echo -e "${C_WHITE}公网IPv6地址: ${C_PURPLE}${ipv6_address}${C_NC}"
+    echo -e "${C_WHITE}网络优先级: ${C_PURPLE}${priority_text}${C_NC}"
     echo "------------------------"
     if [ -n "$country" ] || [ -n "$city" ]; then
-        echo "地理位置: $country $city"
+        echo -e "${C_WHITE}地理位置: ${C_PURPLE}${country} ${city}${C_NC}"
     else
-        echo "地理位置: 未知"
+        echo -e "${C_WHITE}地理位置: ${C_PURPLE}未知${C_NC}"
     fi
-    echo "系统时间: $current_time"
+    echo -e "${C_WHITE}系统时间: ${C_PURPLE}${current_time}${C_NC}"
     echo "------------------------"
-    echo "系统运行时长: $runtime"
+    echo -e "${C_WHITE}系统运行时长: ${C_PURPLE}${runtime}${C_NC}"
     echo
+    # 和 ssh_tool 一样：看完按任意键才回菜单，不直接把菜单打出来
+    echo -e "${C_GREEN}执行完成${C_NC}"
+    echo -e "${C_YELLOW}按任意键返回...${C_NC}"
+    read -n 1 -s -r -p "" 2>/dev/null || true
+    echo ""
+    clear 2>/dev/null || true
     return 0
 }
 
