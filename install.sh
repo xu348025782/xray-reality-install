@@ -10,7 +10,7 @@ XRAY_VERSION="v26.3.27"
 SHORTCUT_NAME="xx"
 SCRIPT_URL="https://raw.githubusercontent.com/xu348025782/xray-reality-install/main/install.sh"
 # 本地保存的脚本：xx 只跑这份本地文件，不联网、不默认更新；
-# 只有菜单 6 更新脚本时，才从上面的 SCRIPT_URL 拉新版覆盖它
+# 只有菜单 7 更新脚本时，才从上面的 SCRIPT_URL 拉新版覆盖它
 LOCAL_SCRIPT="/usr/local/bin/xray-reality-install.sh"
 
 clear
@@ -64,8 +64,13 @@ install_deps() {
 # ---------- 3. 常用软件：只装选中的那一个 ----------
 # 已安装 -> 输出“已安装”；没安装 -> 装好后输出“安装完毕”
 install_one_tool() {
-    local name="$1"
-    if command -v "$name" >/dev/null 2>&1; then
+    local name="$1" bin="$1"
+    # 包名和命令名不一定一样：nftables 包提供的命令是 nft，不是 nftables，
+    # 按包名查命令会误报“安装失败”（2026-11-16 在 Alpine 上实测到过）
+    case "$name" in
+        nftables) bin="nft" ;;
+    esac
+    if command -v "$bin" >/dev/null 2>&1; then
         echo "$name 已安装"
         return 0
     fi
@@ -84,7 +89,7 @@ install_one_tool() {
         echo "找不到 apt/apk/yum/dnf，请手动安装 $name"
         return 0
     fi
-    if [ "$ok" = "1" ] && command -v "$name" >/dev/null 2>&1; then
+    if [ "$ok" = "1" ] && command -v "$bin" >/dev/null 2>&1; then
         echo "$name 安装完毕"
     else
         echo "$name 安装失败，请手动检查"
@@ -471,7 +476,7 @@ nft_gen_file() {
     fi
     {
         echo "# 由 xray-reality-install-multi.sh 的 nftables 端口转发菜单生成"
-        echo "# 请勿手动改，改规则用菜单 5；数据文件：$NFT_RULES_FILE"
+        echo "# 请勿手动改，改规则用菜单 6；数据文件：$NFT_RULES_FILE"
         if [ -s "$v4pre" ]; then
             echo "table ip nft_forward {"
             echo "    chain prerouting {"
@@ -632,7 +637,7 @@ nft_forward_add() {
     if nft_apply; then
         echo "转发规则已添加并生效：${proto} ${listen} -> ${target}:${tport}"
     else
-        echo "规则已保存，但本次未生效，请按上面提示检查后再从菜单 5 启动"
+        echo "规则已保存，但本次未生效，请按上面提示检查后再从菜单 6 启动"
     fi
     echo
     return 0
@@ -731,7 +736,7 @@ nft_forward_menu() {
 
 # ---------- 11. 快捷命令 xx + 本地保存 + 更新脚本 ----------
 # xx 是本地模式：只跑 LOCAL_SCRIPT，不联网拉取，所以平时进菜单不会默认更新。
-# 只有菜单 6 更新脚本时，才从 GitHub 拉新版覆盖 LOCAL_SCRIPT，再重进菜单。
+# 只有菜单 7 更新脚本时，才从 GitHub 拉新版覆盖 LOCAL_SCRIPT，再重进菜单。
 # 本地文件不存在时（比如被误删），xx 才回落到从 GitHub 拉一次。
 install_shortcut() {
     local mode="${1:-manual}"
@@ -782,7 +787,7 @@ save_local_copy() {
     return 0
 }
 
-# 菜单 6 更新脚本：唯一会联网拉新版的地方。
+# 菜单 7 更新脚本：唯一会联网拉新版的地方。
 # 下载 -> bash -n 检查 -> 和本地版比对：一样就报已是最新，不同就覆盖本地
 # 并用 exec 重进新版菜单；下载或检查失败就留在旧版不动。
 update_script() {
@@ -882,6 +887,142 @@ ip_priority_menu() {
     done
 }
 
+# ---------- 12. 本机信息：借鉴 ssh_tool 第 1 项 ----------
+# 显示内容和 ssh_tool 第 1 项一致：主机名、运营商、系统版本、内核、
+# CPU（架构/型号/核心数/占用）、内存、虚拟内存、硬盘、总收发流量、
+# 拥堵算法、公网 v4/v6、地理位置、系统时间、运行时长。
+# 只读不改任何配置；查公网 IP 和地理位置要联网（curl -m 2，超时就显示未知）。
+show_local_info() {
+    local hostname_val os_info kernel_version cpu_arch cpu_info cpu_cores
+    local cpu_usage mem_info swap_info disk_info traffic_info
+    local congestion_algorithm queue_algorithm ipv4_address ipv6_address
+    local country city isp_info current_time runtime
+    hostname_val=$(hostname 2>/dev/null || echo "未知")
+    kernel_version=$(uname -r 2>/dev/null || echo "未知")
+    cpu_arch=$(uname -m 2>/dev/null || echo "未知")
+    cpu_cores=$(nproc 2>/dev/null || echo "未知")
+
+    # CPU 型号：x86_64 读 /proc/cpuinfo，其他架构用 lscpu
+    if [ "$cpu_arch" = "x86_64" ]; then
+        cpu_info=$(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | sed -e 's/model name[[:space:]]*: //')
+    else
+        cpu_info=$(lscpu 2>/dev/null | grep 'Model name' | sed -e 's/Model name[[:space:]]*: //')
+    fi
+    [ -z "$cpu_info" ] && cpu_info="未知"
+
+    # CPU 占用：GNU top 的 Cpu(s) 行是 us+sy；BusyBox top 没有这行，
+    # 它的 CPU: 行是 usr/sys/nic/idle，占用 = 100 - idle
+    cpu_usage=""
+    if command -v top >/dev/null 2>&1; then
+        cpu_usage=$(top -bn1 2>/dev/null | grep -i 'Cpu(s)' | head -1 | awk '{printf "%.2f", $2 + $4}' || true)
+        if [ -z "$cpu_usage" ]; then
+            cpu_usage=$(top -bn1 2>/dev/null | grep -i '^CPU:' | awk '{for (i=1; i<=NF; i++) if ($i == "idle") {printf "%.2f", 100 - $(i-1); exit}}' || true)
+        fi
+    fi
+    [ -z "$cpu_usage" ] && cpu_usage="未知"
+
+    # 内存 / 虚拟内存
+    if command -v free >/dev/null 2>&1; then
+        mem_info=$(free -b 2>/dev/null | awk 'NR==2 && $2 > 0 {printf "%.2f/%.2f MB (%.2f%%)", $3/1024/1024, $2/1024/1024, $3*100/$2}' || true)
+        swap_info=$(free -m 2>/dev/null | awk 'NR==3 {if ($2 == 0) print "0MB/0MB (0%)"; else printf "%sMB/%sMB (%d%%)", $3, $2, $3*100/$2}' || true)
+    fi
+    [ -z "$mem_info" ] && mem_info="未知"
+    [ -z "$swap_info" ] && swap_info="未知"
+
+    # 硬盘占用（根分区）：直接用 df -h 原值带单位显示，不用 %d 截断，
+    # 否则 Used 是 M、Size 是 G 时会显示成 "49/7GB" 这种错数
+    disk_info=$(df -h 2>/dev/null | awk '$NF=="/"{printf "%s/%s (%s)", $3, $2, $5}' || true)
+    [ -z "$disk_info" ] && disk_info="未知"
+
+    # 总接收 / 总发送（/proc/net/dev 各网卡求和）
+    traffic_info=$(awk 'BEGIN { rx_total = 0; tx_total = 0 }
+        NR > 2 { rx_total += $2; tx_total += $10 }
+        END {
+            rx_units = "Bytes"; tx_units = "Bytes";
+            if (rx_total > 1024) { rx_total /= 1024; rx_units = "KB"; }
+            if (rx_total > 1024) { rx_total /= 1024; rx_units = "MB"; }
+            if (rx_total > 1024) { rx_total /= 1024; rx_units = "GB"; }
+            if (tx_total > 1024) { tx_total /= 1024; tx_units = "KB"; }
+            if (tx_total > 1024) { tx_total /= 1024; tx_units = "MB"; }
+            if (tx_total > 1024) { tx_total /= 1024; tx_units = "GB"; }
+            printf("总接收: %.2f %s\n总发送: %.2f %s\n", rx_total, rx_units, tx_total, tx_units);
+        }' /proc/net/dev 2>/dev/null || true)
+    [ -z "$traffic_info" ] && traffic_info="总接收: 未知
+总发送: 未知"
+
+    congestion_algorithm=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+    queue_algorithm=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+
+    # 系统版本：lsb_release 没有就读 /etc/os-release，再没有就读发行文件
+    os_info=$(lsb_release -ds 2>/dev/null || true)
+    if [ -z "$os_info" ]; then
+        if [ -f "/etc/os-release" ]; then
+            os_info=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | sed -e 's/^PRETTY_NAME=//' -e 's/^"//' -e 's/"$//')
+        elif [ -f "/etc/debian_version" ]; then
+            os_info="Debian $(cat /etc/debian_version 2>/dev/null)"
+        elif [ -f "/etc/redhat-release" ]; then
+            os_info=$(cat /etc/redhat-release 2>/dev/null)
+        else
+            os_info="Unknown"
+        fi
+    fi
+
+    # 公网 IP 和地理位置：curl 不在或超时就显示未知
+    if command -v curl >/dev/null 2>&1; then
+        ipv4_address=$(curl -s -m 2 ipv4.ip.sb 2>/dev/null || true)
+        ipv6_address=$(curl -s -m 2 ipv6.ip.sb 2>/dev/null || true)
+        country=$(curl -s -m 2 ipinfo.io/country 2>/dev/null || true)
+        city=$(curl -s -m 2 ipinfo.io/city 2>/dev/null || true)
+        isp_info=$(curl -s -m 2 ipinfo.io/org 2>/dev/null || true)
+    fi
+    [ -z "$ipv4_address" ] && ipv4_address="未知"
+    [ -z "$ipv6_address" ] && ipv6_address="未知"
+    [ -z "$isp_info" ] && isp_info="未知"
+
+    current_time=$(date "+%Y-%m-%d %I:%M %p" 2>/dev/null || echo "未知")
+    runtime=$(awk -F. '{run_days=int($1 / 86400); run_hours=int(($1 % 86400) / 3600); run_minutes=int(($1 % 3600) / 60); if (run_days > 0) printf("%d天 ", run_days); if (run_hours > 0) printf("%d时 ", run_hours); printf("%d分\n", run_minutes)}' /proc/uptime 2>/dev/null || echo "未知")
+
+    echo
+    echo "系统信息详情"
+    echo "------------------------"
+    echo "主机名: $hostname_val"
+    echo "运营商: $isp_info"
+    echo "------------------------"
+    echo "系统版本: $os_info"
+    echo "Linux版本: $kernel_version"
+    echo "------------------------"
+    echo "CPU架构: $cpu_arch"
+    echo "CPU型号: $cpu_info"
+    echo "CPU核心数: $cpu_cores"
+    echo "------------------------"
+    if [ "$cpu_usage" = "未知" ]; then
+        echo "CPU占用: 未知"
+    else
+        echo "CPU占用: $cpu_usage%"
+    fi
+    echo "物理内存: $mem_info"
+    echo "虚拟内存: $swap_info"
+    echo "硬盘占用: $disk_info"
+    echo "------------------------"
+    echo "$traffic_info"
+    echo "------------------------"
+    echo "网络拥堵算法: $congestion_algorithm $queue_algorithm"
+    echo "------------------------"
+    echo "公网IPv4地址: $ipv4_address"
+    echo "公网IPv6地址: $ipv6_address"
+    echo "------------------------"
+    if [ -n "$country" ] || [ -n "$city" ]; then
+        echo "地理位置: $country $city"
+    else
+        echo "地理位置: 未知"
+    fi
+    echo "系统时间: $current_time"
+    echo "------------------------"
+    echo "系统运行时长: $runtime"
+    echo
+    return 0
+}
+
 # ---------- 13. 一级菜单 ----------
 # 第一次运行先把当前脚本存到本地、再自动创建快捷命令，
 # 之后直接输入 xx 就能进菜单（跑本地文件，不默认更新）
@@ -890,24 +1031,26 @@ install_shortcut auto || true
 while true; do
     echo
     echo "========================================"
-    echo "1. 常用软件"
-    echo "2. Reality 相关"
-    echo "3. 系统时区调整上海时间"
-    echo "4. 创建快捷命令 xx"
-    echo "5. nftables 端口转发"
-    echo "6. 更新脚本"
-    echo "7. 切换 V4/V6 优先"
+    echo "1. 本机信息"
+    echo "2. 常用软件"
+    echo "3. Reality 相关"
+    echo "4. 系统时区调整上海时间"
+    echo "5. 创建快捷命令 xx"
+    echo "6. nftables 端口转发"
+    echo "7. 更新脚本"
+    echo "8. 切换 V4/V6 优先"
     echo "0. 退出"
     echo "========================================"
-    read -p "请选择 [0-7]: " MAIN || exit 0
+    read -p "请选择 [0-8]: " MAIN || exit 0
     case "$MAIN" in
-        1) common_software_menu ;;
-        2) reality_menu ;;
-        3) set_timezone_shanghai ;;
-        4) install_shortcut manual || true ;;
-        5) nft_forward_menu ;;
-        6) update_script || true ;;
-        7) ip_priority_menu ;;
+        1) show_local_info ;;
+        2) common_software_menu ;;
+        3) reality_menu ;;
+        4) set_timezone_shanghai ;;
+        5) install_shortcut manual || true ;;
+        6) nft_forward_menu ;;
+        7) update_script || true ;;
+        8) ip_priority_menu ;;
         0) exit 0 ;;
         *) echo "无效选择，请重新输入" ;;
     esac
